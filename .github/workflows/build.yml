@@ -1,70 +1,76 @@
-
-
-name: Build
+# .github/workflows/build.yml
+#
+# GitHub Actions 工作流：用于构建和测试 Phantom Server
+#
+# 何时触发:
+# 1. 推送到 `main` 分支
+# 2. 创建或更新到 `main` 分支的 Pull Request
+#
+# 主要任务:
+# - 安装 Go 和 eBPF 编译环境
+# - 缓存 Go 模块以加速构建
+# - 运行代码风格检查 (lint)
+# - 运行单元测试和集成测试 (带 race detector)
+# - 编译 Go 主程序和 eBPF 内核程序
+#
+name: Build and Test
 
 on:
   push:
-    branches: [main, develop]
+    branches: [ "main" ]
   pull_request:
-    branches: [main]
+    branches: [ "main" ]
 
 jobs:
   build:
+    name: Build & Test
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go: ['1.21', '1.22']
     
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Go
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Go 环境
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go }}
-      
-      - name: Cache Go modules
+          # 直接指定一个版本，而不是使用 matrix
+          go-version: '1.22.x'
+
+      - name: 缓存 Go 模块
         uses: actions/cache@v4
         with:
-          path: ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: ${{ runner.os }}-go-
-      
-      - name: Download dependencies
-        run: go mod download
-      
-      - name: Build
-        run: make build
-      
-      - name: Test
-        run: make test
-      
-      - name: Lint
-        uses: golangci/golangci-lint-action@v4
-        with:
-          version: latest
-        continue-on-error: true
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-1.22-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.22-
 
-  build-multi-platform:
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main'
-    
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: 安装 eBPF 编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev bpftool linux-tools-common gcc-multilib
+
+      - name: 安装 golangci-lint
+        uses: golangci/golangci-lint-action@v6
         with:
-          go-version: '1.22'
-      
-      - name: Build all platforms
-        run: make release
-      
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: binaries
-          path: dist/
-		  
-		  
+          version: v1.58.1 # 锁定版本以确保一致性
+
+      - name: 整理依赖
+        run: go mod tidy
+
+      - name: 运行代码检查 (Lint)
+        run: make lint
+
+      - name: 运行测试 (Unit & Integration)
+        # 使用 sudo 是因为 eBPF 相关测试可能需要 root 权限
+        run: sudo make test
+
+      - name: 构建所有组件 (Go + eBPF)
+        run: make build-all
+
+      - name: 验证构建产物
+        run: |
+          ls -l phantom-server
+          ls -l ebpf/*.o
+          ./phantom-server -v
